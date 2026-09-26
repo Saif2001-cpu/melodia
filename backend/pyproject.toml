@@ -1,0 +1,56 @@
+[tool.poetry]
+name = "melodia-backend"
+version = "0.1.0"
+description = "Melodia music streaming backend"
+authors = ["Melodia Team"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.10"
+fastapi = "^0.115.0"
+uvicorn = {extras = ["standard"], version = "^0.30.0"}
+pydantic = {extras = ["email"], version = "^2.8.0"}
+pydantic-settings = "^2.4.0"
+sqlalchemy = {extras = ["asyncio"], version = "^2.0.35"}
+alembic = "^1.13.2"
+asyncpg = "^0.29.0"
+redis = {extras = ["hiredis"], version = "^5.0.8"}
+python-jose = {extras = ["cryptography"], version = "^3.3.0"}
+passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+bcrypt = "4.0.1"
+python-multipart = "^0.0.12"
+httpx = "^0.27.2"
+structlog = "^24.4.0"
+tenacity = "^9.0.0"
+aiohttp = "^3.10.5"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.3"
+pytest-asyncio = "^0.24.0"
+pytest-cov = "^5.0.0"
+httpx = "^0.27.2"
+aiosqlite = "^0.20.0"
+ruff = "^0.6.5"
+mypy = "^1.11.2"
+types-passlib = "^1.7.7"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["B008", "UP007", "UP017"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
