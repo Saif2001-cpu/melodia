@@ -48,15 +48,7 @@ async def get_current_user_uuid(
 CurrentUserID = Annotated[str, Depends(get_current_user_id)]
 CurrentUserUUID = Annotated[UUID, Depends(get_current_user_uuid)]
 
-
-_music_provider = None
-
-
-async def get_music_provider():
-    """Dependency to inject the MusicProvider (Deezer) as a module-level singleton."""
-    global _music_provider
-    from app.providers.deezer import DeezerProvider
-
-    if _music_provider is None:
-        _music_provider = DeezerProvider()
-    return _music_provider
+# NOTE: The music-provider dependency lives in ``app.providers.factory``
+# (``get_music_provider``). It used to be duplicated here as a second,
+# hardcoded-Deezer singleton, which silently defeated both the
+# MUSIC_PROVIDER setting and the test overrides. Use the factory version.

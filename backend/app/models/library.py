@@ -25,7 +25,7 @@ class LikedSong(Base):
     )
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=text("TIMEZONE('utc', CURRENT_TIMESTAMP)"),
+        server_default=text('CURRENT_TIMESTAMP'),
         nullable=False,
     )
 
@@ -44,7 +44,7 @@ class SavedAlbum(Base):
     )
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=text("TIMEZONE('utc', CURRENT_TIMESTAMP)"),
+        server_default=text('CURRENT_TIMESTAMP'),
         nullable=False,
     )
 
@@ -63,7 +63,7 @@ class FollowedArtist(Base):
     )
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=text("TIMEZONE('utc', CURRENT_TIMESTAMP)"),
+        server_default=text('CURRENT_TIMESTAMP'),
         nullable=False,
     )
 
@@ -83,7 +83,7 @@ class PlayHistory(Base):
     )
     played_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=text("TIMEZONE('utc', CURRENT_TIMESTAMP)"),
+        server_default=text('CURRENT_TIMESTAMP'),
         nullable=False,
         index=True,
     )

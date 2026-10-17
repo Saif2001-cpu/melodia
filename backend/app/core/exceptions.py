@@ -3,6 +3,7 @@
 from typing import Any
 
 from fastapi import FastAPI, Request, status
+from fastapi.exceptions import HTTPException as NotFoundException
 from fastapi.responses import JSONResponse
 
 
@@ -61,6 +62,19 @@ class ExternalServiceError(MelodiaException):
 
 def register_exception_handlers(app: FastAPI) -> None:
     """Register global exception handlers on the FastAPI app."""
+
+    @app.exception_handler(NotFoundException)
+    async def http_exception_handler(request: Request, exc: NotFoundException) -> JSONResponse:
+        """Normalize FastAPI/starlette HTTPExceptions into the same envelope
+        as MelodiaException so clients always receive ``{error, message}``.
+        """
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": exc.__class__.__name__,
+                "message": str(exc.detail),
+            },
+        )
 
     @app.exception_handler(MelodiaException)
     async def melodia_exception_handler(request: Request, exc: MelodiaException) -> JSONResponse:

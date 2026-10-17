@@ -1,8 +1,7 @@
 """conftest.py — shared pytest fixtures."""
 
-import asyncio
 import os
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
@@ -22,20 +21,16 @@ os.environ.setdefault("ENVIRONMENT", "development")
 # ─────────────────────────────────────────────────────────────────────────────
 # Late imports — after env vars are in place
 # ─────────────────────────────────────────────────────────────────────────────
+from app.core.security import create_access_token  # noqa: E402
 from app.db.session import Base, get_db  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.models.track import Artist  # noqa: E402
+from app.models.user import User  # noqa: E402
 from app.providers.factory import get_music_provider  # noqa: E402
 from app.providers.mock import MockMusicProvider  # noqa: E402
 
 # In-memory SQLite for fast unit tests
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
-
-
-@pytest.fixture(scope="session")
-def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -57,6 +52,31 @@ async def db_session(test_engine) -> AsyncGenerator[AsyncSession, None]:  # type
     async with session_factory() as session:
         yield session
         await session.rollback()
+
+
+@pytest_asyncio.fixture
+async def user(db_session: AsyncSession) -> User:
+    """A persisted test user."""
+    u = User(email="test@example.com", username="testuser", hashed_password="x")
+    db_session.add(u)
+    await db_session.commit()
+    await db_session.refresh(u)
+    return u
+
+
+@pytest_asyncio.fixture
+async def artist(db_session: AsyncSession) -> Artist:
+    """A persisted test artist (for followed-artist endpoints)."""
+    a = Artist(id="art-1", name="Test Artist")
+    db_session.add(a)
+    await db_session.commit()
+    return a
+
+
+@pytest.fixture
+def auth_headers(user: User) -> dict[str, str]:
+    """Authorization headers carrying a valid access token for the test user."""
+    return {"Authorization": f"Bearer {create_access_token(user.id)}"}
 
 
 @pytest.fixture
