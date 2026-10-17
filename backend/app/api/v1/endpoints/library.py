@@ -1,206 +1,166 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
+"""Library API endpoints.
 
+Thin HTTP layer — all database/business logic lives in
+:mod:`app.services.library`.
+"""
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.deps import CurrentUserID
 from app.db.session import get_db
-from app.core.deps import get_current_user_id
-from app.models.library import LikedSong, SavedAlbum, FollowedArtist, PlayHistory
-from app.models.track import Track, Album, Artist
-from app.schemas.music import TrackResponse, AlbumResponse, ArtistResponse
+from app.schemas.music import AlbumResponse, ArtistResponse, TrackResponse
 from app.schemas.pagination import Page
+from app.services.library import build_page, library_service
 
 router = APIRouter()
 
+
 @router.get("/liked-songs", response_model=Page[TrackResponse])
 async def get_liked_songs(
+    current_user_id: CurrentUserID,
+    db: AsyncSession = Depends(get_db),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    offset = (page - 1) * size
-    
-    count_query = select(LikedSong).where(LikedSong.user_id == current_user_id)
-    total_result = await db.execute(count_query)
-    total = len(total_result.unique().all())
-    
-    query = (
-        select(LikedSong)
-        .where(LikedSong.user_id == current_user_id)
-        .options(selectinload(LikedSong.track))
-        .order_by(LikedSong.added_at.desc())
-        .offset(offset)
-        .limit(size)
+) -> Page[TrackResponse]:
+    """List the current user's liked songs (newest first)."""
+    tracks, total = await library_service.get_liked_songs(
+        db, user_id=current_user_id, page=page, size=size
     )
-    result = await db.execute(query)
-    liked_songs = result.scalars().unique().all()
-    
-    items = [TrackResponse.model_validate(ls.track) for ls in liked_songs if ls.track]
-    pages = (total + size - 1) // size
-    return Page[TrackResponse](
-        items=items,
+    return build_page(
+        [TrackResponse.model_validate(t) for t in tracks],
         total=total,
         page=page,
         size=size,
-        pages=pages,
-        has_next=page < pages,
-        has_prev=page > 1,
     )
+
 
 @router.post("/liked-songs/{track_id}")
 async def like_track(
     track_id: str,
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    # Ensure track exists first
-    track_query = select(Track).where(Track.id == track_id)
-    track_result = await db.execute(track_query)
-    if not track_result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Track not found in local DB. Fetch it first.")
-        
-    query = select(LikedSong).where(LikedSong.user_id == current_user_id, LikedSong.track_id == track_id)
-    result = await db.execute(query)
-    if result.scalar_one_or_none():
-        return {"status": "ok"}
-        
-    ls = LikedSong(user_id=current_user_id, track_id=track_id)
-    db.add(ls)
-    await db.commit()
+) -> dict[str, str]:
+    """Like a track (idempotent). The track must already be cached locally."""
+    await library_service.like_track(db, user_id=current_user_id, track_id=track_id)
     return {"status": "ok"}
 
-@router.delete("/liked-songs/{track_id}", status_code=status.HTTP_204_NO_CONTENT)
+
+@router.delete("/liked-songs/{track_id}", status_code=204)
 async def unlike_track(
     track_id: str,
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    query = select(LikedSong).where(LikedSong.user_id == current_user_id, LikedSong.track_id == track_id)
-    result = await db.execute(query)
-    ls = result.scalar_one_or_none()
-    if ls:
-        await db.delete(ls)
-        await db.commit()
+) -> None:
+    """Remove a track from liked songs."""
+    await library_service.unlike_track(db, user_id=current_user_id, track_id=track_id)
+
 
 @router.get("/albums", response_model=Page[AlbumResponse])
 async def get_saved_albums(
+    current_user_id: CurrentUserID,
+    db: AsyncSession = Depends(get_db),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    offset = (page - 1) * size
-    
-    count_query = select(SavedAlbum).where(SavedAlbum.user_id == current_user_id)
-    total_result = await db.execute(count_query)
-    total = len(total_result.unique().all())
-    
-    query = (
-        select(SavedAlbum)
-        .where(SavedAlbum.user_id == current_user_id)
-        .options(selectinload(SavedAlbum.album))
-        .order_by(SavedAlbum.added_at.desc())
-        .offset(offset)
-        .limit(size)
+) -> Page[AlbumResponse]:
+    """List the current user's saved albums (newest first)."""
+    albums, total = await library_service.get_saved_albums(
+        db, user_id=current_user_id, page=page, size=size
     )
-    result = await db.execute(query)
-    saved_albums = result.scalars().unique().all()
-    
-    items = [AlbumResponse.model_validate(sa.album) for sa in saved_albums if sa.album]
-    pages = (total + size - 1) // size
-    return Page[AlbumResponse](
-        items=items,
+    return build_page(
+        [AlbumResponse.model_validate(a) for a in albums],
         total=total,
         page=page,
         size=size,
-        pages=pages,
-        has_next=page < pages,
-        has_prev=page > 1,
     )
+
 
 @router.post("/albums/{album_id}")
 async def save_album(
     album_id: str,
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    album_query = select(Album).where(Album.id == album_id)
-    album_result = await db.execute(album_query)
-    if not album_result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Album not found in local DB. Fetch it first.")
-        
-    query = select(SavedAlbum).where(SavedAlbum.user_id == current_user_id, SavedAlbum.album_id == album_id)
-    result = await db.execute(query)
-    if result.scalar_one_or_none():
-        return {"status": "ok"}
-        
-    sa = SavedAlbum(user_id=current_user_id, album_id=album_id)
-    db.add(sa)
-    await db.commit()
+) -> dict[str, str]:
+    """Save an album (idempotent). The album must already be cached locally."""
+    await library_service.save_album(db, user_id=current_user_id, album_id=album_id)
     return {"status": "ok"}
 
-@router.delete("/albums/{album_id}", status_code=status.HTTP_204_NO_CONTENT)
+
+@router.delete("/albums/{album_id}", status_code=204)
 async def unsave_album(
     album_id: str,
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    query = select(SavedAlbum).where(SavedAlbum.user_id == current_user_id, SavedAlbum.album_id == album_id)
-    result = await db.execute(query)
-    sa = result.scalar_one_or_none()
-    if sa:
-        await db.delete(sa)
-        await db.commit()
+) -> None:
+    """Remove an album from saved albums."""
+    await library_service.unsave_album(db, user_id=current_user_id, album_id=album_id)
 
-@router.get("/history", response_model=Page[TrackResponse])
-async def get_play_history(
-    page: int = Query(1, ge=1),
-    size: int = Query(50, ge=1, le=100),
+
+@router.get("/artists", response_model=Page[ArtistResponse])
+async def get_followed_artists(
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    offset = (page - 1) * size
-    
-    count_query = select(PlayHistory).where(PlayHistory.user_id == current_user_id)
-    total_result = await db.execute(count_query)
-    total = len(total_result.unique().all())
-    
-    query = (
-        select(PlayHistory)
-        .where(PlayHistory.user_id == current_user_id)
-        .options(selectinload(PlayHistory.track))
-        .order_by(PlayHistory.played_at.desc())
-        .offset(offset)
-        .limit(size)
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+) -> Page[ArtistResponse]:
+    """List the artists the current user follows (newest first)."""
+    artists, total = await library_service.get_followed_artists(
+        db, user_id=current_user_id, page=page, size=size
     )
-    result = await db.execute(query)
-    history_entries = result.scalars().unique().all()
-    
-    items = [TrackResponse.model_validate(h.track) for h in history_entries if h.track]
-    pages = (total + size - 1) // size
-    return Page[TrackResponse](
-        items=items,
+    return build_page(
+        [ArtistResponse.model_validate(a) for a in artists],
         total=total,
         page=page,
         size=size,
-        pages=pages,
-        has_next=page < pages,
-        has_prev=page > 1,
     )
+
+
+@router.post("/artists/{artist_id}")
+async def follow_artist(
+    artist_id: str,
+    current_user_id: CurrentUserID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    """Follow an artist (idempotent). The artist must already be cached locally."""
+    await library_service.follow_artist(db, user_id=current_user_id, artist_id=artist_id)
+    return {"status": "ok"}
+
+
+@router.delete("/artists/{artist_id}", status_code=204)
+async def unfollow_artist(
+    artist_id: str,
+    current_user_id: CurrentUserID,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Unfollow an artist."""
+    await library_service.unfollow_artist(db, user_id=current_user_id, artist_id=artist_id)
+
+
+@router.get("/history", response_model=Page[TrackResponse])
+async def get_play_history(
+    current_user_id: CurrentUserID,
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=100),
+) -> Page[TrackResponse]:
+    """List the current user's play history (most recent first)."""
+    tracks, total = await library_service.get_play_history(
+        db, user_id=current_user_id, page=page, size=size
+    )
+    return build_page(
+        [TrackResponse.model_validate(t) for t in tracks],
+        total=total,
+        page=page,
+        size=size,
+    )
+
 
 @router.post("/history/{track_id}")
 async def add_play_history(
     track_id: str,
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    track_query = select(Track).where(Track.id == track_id)
-    track_result = await db.execute(track_query)
-    if not track_result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Track not found in local DB. Fetch it first.")
-        
-    ph = PlayHistory(user_id=current_user_id, track_id=track_id)
-    db.add(ph)
-    await db.commit()
+) -> dict[str, str]:
+    """Record that the user played a track."""
+    await library_service.add_play_history(db, user_id=current_user_id, track_id=track_id)
     return {"status": "ok"}

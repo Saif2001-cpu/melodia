@@ -51,7 +51,7 @@ class PlaylistTrack(Base):
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=text("TIMEZONE('utc', CURRENT_TIMESTAMP)"),
+        server_default=text('CURRENT_TIMESTAMP'),
         nullable=False,
     )
     added_by_id: Mapped[str] = mapped_column(
@@ -74,7 +74,7 @@ class PlaylistCollaborator(Base):
     )
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=text("TIMEZONE('utc', CURRENT_TIMESTAMP)"),
+        server_default=text('CURRENT_TIMESTAMP'),
         nullable=False,
     )
 

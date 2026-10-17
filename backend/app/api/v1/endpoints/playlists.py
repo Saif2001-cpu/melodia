@@ -1,279 +1,161 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status, WebSocket, WebSocketDisconnect
+"""Playlist API endpoints.
+
+Thin HTTP layer — business logic and authorization live in
+:mod:`app.services.playlist`; realtime fan-out lives in
+:mod:`app.core.websockets`.
+"""
+
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 
-from app.db.session import get_db
-from app.core.deps import get_current_user_id
-from app.models.playlist import Playlist, PlaylistTrack
-from app.models.track import Track
-from app.models.user import User
-from app.schemas.playlist import (
-    PlaylistCreate,
-    PlaylistUpdate,
-    PlaylistResponse,
-)
-from app.schemas.pagination import Page
-from typing import List
-
+from app.core.deps import CurrentUserID
 from app.core.websockets import manager
+from app.db.session import get_db
+from app.schemas.pagination import Page
+from app.schemas.playlist import PlaylistCreate, PlaylistResponse
+from app.services.library import build_page
+from app.services.playlist import playlist_repo, playlist_service
 
 router = APIRouter()
 
+
+class AddTrackRequest(BaseModel):
+    """Body for adding a track to a playlist."""
+
+    track_id: str = Field(..., min_length=1)
+
+
+class ReorderTracksRequest(BaseModel):
+    """Body for reordering playlist tracks by explicit track-id order."""
+
+    track_ids: list[str] = Field(default_factory=list)
+
+
+def _to_response(playlist, *, track_count: int | None = None) -> PlaylistResponse:
+    """Build a PlaylistResponse with derived fields populated."""
+    response = PlaylistResponse.model_validate(playlist)
+    response.owner_name = playlist.owner.username
+    response.track_count = track_count if track_count is not None else len(playlist.tracks)
+    return response
+
+
 @router.get("", response_model=Page[PlaylistResponse])
 async def get_playlists(
+    current_user_id: CurrentUserID,
+    db: AsyncSession = Depends(get_db),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    offset = (page - 1) * size
-    
-    # Get total count
-    count_query = select(Playlist).where(Playlist.owner_id == current_user_id)
-    total_result = await db.execute(count_query)
-    total = len(total_result.unique().all())
-    
-    # Get items
-    query = (
-        select(Playlist)
-        .where(Playlist.owner_id == current_user_id)
-        .options(selectinload(Playlist.owner), selectinload(Playlist.tracks).selectinload(PlaylistTrack.track))
-        .order_by(Playlist.created_at.desc())
-        .offset(offset)
-        .limit(size)
+) -> Page[PlaylistResponse]:
+    """List playlists owned by the current user (newest first)."""
+    total = await playlist_repo.count_for_owner(db, owner_id=current_user_id)
+    playlists = await playlist_repo.list_for_owner(
+        db, owner_id=current_user_id, offset=(page - 1) * size, limit=size
     )
-    result = await db.execute(query)
-    playlists = result.scalars().unique().all()
-    
-    items = []
-    for p in playlists:
-        pr = PlaylistResponse.model_validate(p)
-        pr.owner_name = p.owner.username
-        pr.track_count = len(p.tracks)
-        items.append(pr)
-        
-    pages = (total + size - 1) // size
-    return Page[PlaylistResponse](
-        items=items,
-        total=total,
-        page=page,
-        size=size,
-        pages=pages,
-        has_next=page < pages,
-        has_prev=page > 1,
+    return build_page(
+        [_to_response(p) for p in playlists], total=total, page=page, size=size
     )
 
-@router.post("", response_model=PlaylistResponse)
+
+@router.post("", response_model=PlaylistResponse, status_code=201)
 async def create_playlist(
     playlist_in: PlaylistCreate,
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    user_query = select(User).where(User.id == current_user_id)
-    user_result = await db.execute(user_query)
-    user = user_result.scalar_one_or_none()
-    
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-        
-    db_playlist = Playlist(
+) -> PlaylistResponse:
+    """Create a new empty playlist owned by the current user."""
+    playlist = await playlist_service.create_playlist(
+        db,
+        user_id=current_user_id,
         name=playlist_in.name,
         description=playlist_in.description,
         is_public=playlist_in.is_public,
         is_collaborative=playlist_in.is_collaborative,
-        owner_id=current_user_id,
     )
-    db.add(db_playlist)
-    await db.commit()
-    await db.refresh(db_playlist)
-    
-    pr = PlaylistResponse.model_validate(db_playlist)
-    pr.owner_name = user.username
-    return pr
+    return _to_response(playlist, track_count=0)
+
 
 @router.get("/{playlist_id}", response_model=PlaylistResponse)
 async def get_playlist(
     playlist_id: str,
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    query = (
-        select(Playlist)
-        .where(Playlist.id == playlist_id)
-        .options(selectinload(Playlist.owner), selectinload(Playlist.tracks).selectinload(PlaylistTrack.track))
-    )
-    result = await db.execute(query)
-    playlist = result.scalar_one_or_none()
-    
-    if not playlist:
-        raise HTTPException(status_code=404, detail="Playlist not found")
-        
-    if not playlist.is_public and playlist.owner_id != current_user_id:
-        raise HTTPException(status_code=403, detail="Not authorized to view this playlist")
-        
-    pr = PlaylistResponse.model_validate(playlist)
-    pr.owner_name = playlist.owner.username
-    pr.track_count = len(playlist.tracks)
-    return pr
+) -> PlaylistResponse:
+    """Get a playlist with its tracks (private playlists: owner only)."""
+    playlist = await playlist_repo.get_for_user(db, playlist_id=playlist_id)
+    playlist_service.check_view_access(playlist, current_user_id)
+    return _to_response(playlist)
 
-@router.delete("/{playlist_id}", status_code=status.HTTP_204_NO_CONTENT)
+
+@router.delete("/{playlist_id}", status_code=204)
 async def delete_playlist(
     playlist_id: str,
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    query = select(Playlist).where(Playlist.id == playlist_id)
-    result = await db.execute(query)
-    playlist = result.scalar_one_or_none()
-    
-    if not playlist:
-        raise HTTPException(status_code=404, detail="Playlist not found")
-        
-    if playlist.owner_id != current_user_id:
-        raise HTTPException(status_code=403, detail="Not authorized to delete this playlist")
-        
-    await db.delete(playlist)
-    await db.commit()
+) -> None:
+    """Delete a playlist (owner only)."""
+    await playlist_service.delete_playlist(db, playlist_id=playlist_id, user_id=current_user_id)
 
-@router.post("/{playlist_id}/tracks")
+
+@router.post("/{playlist_id}/tracks", status_code=201)
 async def add_track(
     playlist_id: str,
-    payload: dict,
+    payload: AddTrackRequest,
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    track_id = payload.get("track_id")
-    if not track_id:
-        raise HTTPException(status_code=400, detail="track_id is required")
-        
-    query = select(Playlist).where(Playlist.id == playlist_id).options(selectinload(Playlist.tracks))
-    result = await db.execute(query)
-    playlist = result.scalar_one_or_none()
-    
-    if not playlist:
-        raise HTTPException(status_code=404, detail="Playlist not found")
-        
-    if playlist.owner_id != current_user_id and not playlist.is_collaborative:
-        raise HTTPException(status_code=403, detail="Not authorized to modify this playlist")
-        
-    # Ensure track exists in local DB. If not, ideally fetch from provider and save it. 
-    # For now, let's assume it was added via trending/search which saves it or we just create a dummy one.
-    track_query = select(Track).where(Track.id == track_id)
-    track_result = await db.execute(track_query)
-    track = track_result.scalar_one_or_none()
-    
-    if not track:
-        # We should ideally call get_music_provider() to fetch and save.
-        raise HTTPException(status_code=404, detail="Track not found in local database. Please fetch it first.")
-
-    # Check if already in playlist
-    if any(pt.track_id == track_id for pt in playlist.tracks):
-        return {"status": "ok"}
-        
-    pt = PlaylistTrack(
-        playlist_id=playlist_id,
-        track_id=track_id,
-        position=len(playlist.tracks),
-        added_by_id=current_user_id,
+) -> dict[str, str]:
+    """Add a track to a playlist (owner or collaborator). Idempotent."""
+    await playlist_service.add_track(
+        db, playlist_id=playlist_id, track_id=payload.track_id, user_id=current_user_id
     )
-    db.add(pt)
-    await db.commit()
-    
-    # Broadcast update
     await manager.broadcast_to_playlist(
         playlist_id,
-        {"event": "track_added", "playlist_id": playlist_id, "track_id": track_id}
+        {"event": "track_added", "playlist_id": playlist_id, "track_id": payload.track_id},
     )
-    
     return {"status": "ok"}
-@router.delete("/{playlist_id}/tracks/{track_id}", status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/{playlist_id}/tracks/{track_id}", status_code=204)
 async def remove_track(
     playlist_id: str,
     track_id: str,
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    query = select(Playlist).where(Playlist.id == playlist_id)
-    result = await db.execute(query)
-    playlist = result.scalar_one_or_none()
-    
-    if not playlist:
-        raise HTTPException(status_code=404, detail="Playlist not found")
-        
-    if playlist.owner_id != current_user_id and not playlist.is_collaborative:
-        raise HTTPException(status_code=403, detail="Not authorized to modify this playlist")
-        
-    pt_query = select(PlaylistTrack).where(PlaylistTrack.playlist_id == playlist_id, PlaylistTrack.track_id == track_id)
-    pt_result = await db.execute(pt_query)
-    pt = pt_result.scalar_one_or_none()
-    
-    if pt:
-        await db.delete(pt)
-        
-        # update positions of subsequent tracks
-        update_query = (
-            select(PlaylistTrack)
-            .where(PlaylistTrack.playlist_id == playlist_id, PlaylistTrack.position > pt.position)
-        )
-        res = await db.execute(update_query)
-        for sub_pt in res.scalars().all():
-            sub_pt.position -= 1
-            
-        await db.commit()
-        
-        # Broadcast update
-        await manager.broadcast_to_playlist(
-            playlist_id,
-            {"event": "track_removed", "playlist_id": playlist_id, "track_id": track_id}
-        )
+) -> None:
+    """Remove a track from a playlist (owner or collaborator)."""
+    await playlist_service.remove_track(
+        db, playlist_id=playlist_id, track_id=track_id, user_id=current_user_id
+    )
+    await manager.broadcast_to_playlist(
+        playlist_id,
+        {"event": "track_removed", "playlist_id": playlist_id, "track_id": track_id},
+    )
+
 
 @router.put("/{playlist_id}/tracks/reorder")
 async def reorder_tracks(
     playlist_id: str,
-    payload: dict,
+    payload: ReorderTracksRequest,
+    current_user_id: CurrentUserID,
     db: AsyncSession = Depends(get_db),
-    current_user_id: str = Depends(get_current_user_id),
-):
-    # payload: {"track_ids": ["id1", "id2", ...]}
-    track_ids = payload.get("track_ids", [])
-    
-    query = select(Playlist).where(Playlist.id == playlist_id).options(selectinload(Playlist.tracks))
-    result = await db.execute(query)
-    playlist = result.scalar_one_or_none()
-    
-    if not playlist:
-        raise HTTPException(status_code=404, detail="Playlist not found")
-        
-    if playlist.owner_id != current_user_id and not playlist.is_collaborative:
-        raise HTTPException(status_code=403, detail="Not authorized to modify this playlist")
-        
-    # Map track_id -> PlaylistTrack
-    pt_map = {pt.track_id: pt for pt in playlist.tracks}
-    
-    # Update positions
-    for i, tid in enumerate(track_ids):
-        if tid in pt_map:
-            pt_map[tid].position = i
-            
-    await db.commit()
-    
-    # Broadcast update
-    await manager.broadcast_to_playlist(
-        playlist_id,
-        {"event": "tracks_reordered", "playlist_id": playlist_id}
+) -> dict[str, str]:
+    """Reorder playlist tracks by providing the desired track-id order."""
+    await playlist_service.reorder_tracks(
+        db, playlist_id=playlist_id, track_ids=payload.track_ids, user_id=current_user_id
     )
-    
+    await manager.broadcast_to_playlist(
+        playlist_id, {"event": "tracks_reordered", "playlist_id": playlist_id}
+    )
     return {"status": "ok"}
 
 
 @router.websocket("/{playlist_id}/ws")
-async def websocket_endpoint(websocket: WebSocket, playlist_id: str):
+async def playlist_websocket(websocket: WebSocket, playlist_id: str) -> None:
+    """Realtime channel notifying clients about playlist modifications."""
     await manager.connect(websocket, playlist_id)
     try:
         while True:
-            # We don't expect messages from client for now, just keep connection open
-            data = await websocket.receive_text()
+            # Clients don't send meaningful messages; reads keep the socket alive.
+            await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket, playlist_id)
-
